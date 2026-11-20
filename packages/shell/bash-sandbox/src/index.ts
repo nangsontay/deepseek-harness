@@ -115,13 +115,17 @@ export class SandboxBashExecutor extends LocalBashExecutor {
     return SandboxBashExecutor.decorateResult(ex, (result) => {
       if (confined === undefined) return { ...result, sandbox: { mode, denied: false } }
       const { enforcement, denialSignatures, runnerFailureRules } = confined
+      // Classify against the diagnostic tail regardless of the displayed preview.
+      const stderr = spec.outputPreview === 'head-tail'
+        ? { ...result.stderr, text: ex.observed.stderr.readFrom(0).text }
+        : result.stderr
       // Runner failure outranks denial because the command did not run. Carry
       // the matched fatal line, not an informational line that preceded it.
-      const runnerFailure = classifyRunnerFailure(result.exitCode, result.stderr.text, runnerFailureRules)
+      const runnerFailure = classifyRunnerFailure(result.exitCode, stderr.text, runnerFailureRules)
       if (runnerFailure !== undefined) {
         throw new SandboxUnavailableError(mode, runnerFailure.detail)
       }
-      return { ...result, sandbox: { mode, denied: classifyDenial(result, denialSignatures), enforcement } }
+      return { ...result, sandbox: { mode, denied: classifyDenial({ ...result, stderr }, denialSignatures), enforcement } }
     }, (error) => {
       // An upstream abort remains cancellation even when it prevents spawn.
       if (spec.signal?.aborted === true) spec.signal.throwIfAborted()

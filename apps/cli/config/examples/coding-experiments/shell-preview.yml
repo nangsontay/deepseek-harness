@@ -1,0 +1,4 @@
+- id: bash-sandbox
+  config:
+    timeoutMs: 60000
+    outputPreview: head-tail

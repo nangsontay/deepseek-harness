@@ -8,12 +8,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
 import type { DiffCallView, DiffResultView, ToolResult } from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-fs'
+import { FsError } from '@deepseek-ai/dsh-fs'
 import { computeHunkDiffs, diffsFromMeta } from './diff.ts'
 import { remediateFsError } from './error.ts'
 import { mutationResult } from './mutation-result.ts'
 import { sessionResolveOptions } from './session-cwd.ts'
 import type { FsSandboxController } from './sandbox.ts'
+import type { Config } from './index.ts'
 
 /** Validated `edit` arguments after defaulting. */
 interface EditInput {
@@ -72,8 +73,13 @@ export function formatEditOutput(displayPath: string, replaceAll: boolean): stri
  * Register the `edit` tool and its scope-aware system-prompt guidance.
  * @param ctx - the plugin context; registrations are effects scoped to it, and execution uses its `fs` service.
  * @param sandbox - the shared sandbox-escalation API (advertisement, mode stamping, denial mapping).
+ * @param config - optional guidance and literal-miss recovery policy.
  */
-export function applyEditTool(ctx: Context, sandbox: FsSandboxController): void {
+export function applyEditTool(
+  ctx: Context,
+  sandbox: FsSandboxController,
+  config: Pick<Config, 'editGuidance' | 'editRecoveryHint'>,
+): void {
   ctx.systemPrompt.section({
     name: 'tool:edit',
     order: ctx.systemPrompt.getSectionOrder('TOOL_EDIT'),
@@ -81,6 +87,16 @@ export function applyEditTool(ctx: Context, sandbox: FsSandboxController): void 
       ? ''
       : 'Read a file before editing it unless you just created or edited it in this session.',
   })
+  if (config.editGuidance) {
+    ctx.systemPrompt.section({
+      name: 'tool:edit:copy',
+      order: ctx.systemPrompt.getSectionOrder('TOOL_EDIT'),
+      text: ({ scope }) => ctx.tools.get('read', scope) !== undefined && ctx.tools.get('edit', scope) !== undefined
+        ? 'When copying old_string from read, omit the displayed "line number: " prefix and keep the original indentation. '
+          + 'In Code mode, take the text field of each line and join adjacent lines with newlines.'
+        : '',
+    })
+  }
 
   ctx.tools.register(defineTool({
     name: 'edit',
@@ -142,7 +158,14 @@ export function applyEditTool(ctx: Context, sandbox: FsSandboxController): void 
         // A sandbox denial becomes the shared [sandbox: …] marker (the model
         // recognizes it from bash); guarded mutation failures receive their
         // stable model-facing diagnostic; anything else passes through.
-        throw remediateFsError(sandbox.mapError(error, sandboxPolicy), target.displayPath)
+        const failure = remediateFsError(sandbox.mapError(error, sandboxPolicy), target.displayPath)
+        if (config.editRecoveryHint && failure instanceof FsError && failure.code === 'FS_EDIT_NOT_FOUND') {
+          throw new FsError(
+            `${failure.message}. Read the target lines again, then retry with exact text and indentation from the file, excluding any displayed line numbers.`,
+            failure.code, { cause: failure },
+          )
+        }
+        throw failure
       }
       return mutationResult(ctx, target, outcome, exec)
     },

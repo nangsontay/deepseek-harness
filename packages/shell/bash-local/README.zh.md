@@ -44,9 +44,12 @@ kind: "package-reference"
 | `cwd` | `process.cwd()` | 命令的默认工作目录 |
 | `timeoutMs` | `120,000` | 默认前台超时，单位为毫秒 |
 | `maxTimeoutMs` | `600,000` | 每次调用超时覆盖值的上限 |
-| `maxOutputBytes` | `64,000` | 每流内存输出上限；溢出后 spill 到临时文件 |
+| `maxOutputBytes` | `64,000` | 每个输出流的预览字节上限和实时尾部窗口 |
+| `outputPreview` | `tail` | 可设为 `head-tail`，显示截断输出的开头和结尾，并标记中间省略的部分 |
 | `maxSpillBytes` | `67,108,864` | 每流完整输出的 spill 上限 |
 | `graceMs` | `3,000` | 终止升级与退出后管道排空的宽限时间 |
+
+本地子进程提供方在 `head-tail` 模式下将预览及省略标记限制在 `maxOutputBytes` 内，后台作业仍可读取完整的尾部窗口。每个输出流额外使用的内存最多为该上限的一半。未超过 `maxSpillBytes` 时，可以从 spill 文件中读取完整输出。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-bash-local)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
@@ -123,7 +126,7 @@ if (result.timedOut) console.log('timed out after', result.timeoutMs)
 <a id="model-experience"></a>
 ## 模型体验
 
-通过 `dsh-tool-bash` 间接影响；该工具会渲染本执行器有界的 stdout/stderr 尾部、后台进程增量、spill 文件路径与基础设施失败。
+通过 `dsh-tool-bash` 间接影响；该工具会渲染本执行器有界的 stdout/stderr 预览、后台进程增量、spill 文件路径与基础设施失败。
 
 #### KV Cache 影响
 

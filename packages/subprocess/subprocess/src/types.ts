@@ -20,7 +20,7 @@ export type DshEnvironment = Readonly<Record<DshEnvironmentKey, string>>
 
 /** One captured stream: the (possibly truncated) text plus recovery info. */
 export interface CollectedOutput {
-  /** Collected text — the TAIL of the stream when truncated. */
+  /** Collected text, formatted with the selected preview when truncated. */
   text: string
   /** True when bytes were dropped from `text`. */
   truncated: boolean
@@ -42,8 +42,10 @@ export type SubprocessStdinMode = 'ignore' | 'pipe' | { readonly data: string }
  * the complete stream recoverable up to its cap (the bash tool shape).
  */
 export interface SubprocessCollect {
-  /** In-memory cap in bytes; overflow keeps the TAIL. */
+  /** Preview byte cap and incremental tail window size. */
   maxBytes: number
+  /** Also retain a bounded prefix for settled previews on providers that support it. */
+  preview?: 'head-tail'
   /** Full-stream spill file; absent disables spilling entirely. */
   spill?: {
     /** Whole-stream byte cap; a larger stream discards its now-incomplete spill. */
@@ -148,6 +150,11 @@ export interface SubprocessOutputReader {
    * @returns the delta text, the next offset, the `lossy` flag, and the spill path when one exists.
    */
   readFrom(fromByte: number): SubprocessOutputRead
+  /**
+   * Read the settled preview, including the requested prefix when available.
+   * @returns Collected text and the complete spill path, if one exists.
+   */
+  readPreview?(): CollectedOutput
 }
 
 /** Offset-based readers for the streams spawned in collect mode. */

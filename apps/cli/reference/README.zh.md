@@ -25,6 +25,23 @@ dsh rescue --from-default-profile web
 dsh rescue
 ```
 
+### Headless 编程实验
+
+使用当前代码构建的 `dsh` 加载[编程实验覆盖层](../config/examples/coding-experiments)。所有覆盖层都需显式开启。对照测试时，可分别使用 `edit-guidance.yml`、`edit-recovery.yml` 或 `apply-patch.yml`。同时启用三项时使用 `file-editing.yml`，因为后应用的 Cordis patch 会替换整个 `tool-fs` 配置。Bash 预览适用于本地 Bash 后端。验证提醒使用工作区变更记录器，在达到配置的步数上限之前，每轮最多请求一次额外的模型步骤。
+
+```sh
+examples=/absolute/path/to/deepseek-harness/apps/cli/config/examples
+overlays="$examples/coding-experiments"
+dsh --profile headless \
+  --patch "$overlays/file-editing.yml" \
+  --patch "$overlays/shell-preview.yml" \
+  --patch "$overlays/wait-any-job.yml" \
+  --patch "$overlays/verification-reminder.yml" \
+  "Implement the requested change."
+```
+
+测试程序化工具调用（PTC）时，把 `--patch "$examples/ptc.yml"` 放在实验覆盖层之前。只需要提示词指导时，使用 `verification-prompt.yml` 代替 `verification-reminder.yml`。每次试验使用新的 headless 会话，并固定模型、提供方、沙箱、时限和任务验证器。将独立验证器的结果与提供方费用导出成 JSONL，再用 `--help` 查看[配对分析脚本](../../../benchmarks/coding-plugins/summarize.py)所需的字段。`--json` 记录 CLI 顶层工具调用和各步用量。统计 PTC 子调用时，读取持久化会话中的 `tool/ptc-dispatch` 事件。
+
 ### 应用参数
 
 启动器自身的 flag 必须写在最前面，并在遇到第一个无法识别的 token 时结束；从该 token 开始的所有内容都会通过 `ctx.cmdlineArgs` 原样交给已启动的 profile，注入该 profile 的任意应用插件都可以解析这些内容（[`dsh-cmdline`](../../../packages/boot/cmdline/README.zh.md)）。因此，`dsh rescue --from-default-profile web --no-open` 会先重置 rescue，再把 `--no-open` 交给 Web；`dsh --profile web --port 8080` 会将 `--port` 交给 web 应用；`dsh --profile web --help` 只打印该应用的帮助信息，不启动应用；`dsh --help` 没有可供交付参数的 profile，因此会打印启动器自身的帮助信息。`-V`/`--version` 位于应用参数边界之前时，会打印启动器的版本。

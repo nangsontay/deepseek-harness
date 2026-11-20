@@ -42,10 +42,12 @@ export type CompletionDelivery = 'quiet' | 'wakeup'
 
 /** Configures bounded `job_output` waits and completion-notice delivery. */
 export interface Config {
-  /** Wait duration applied when `job_output` sets `wait` without `timeout_ms` (default 30s). */
+  /** Wait duration when `job_output` or `job_wait` waits without `timeout_ms` (default 30s). */
   waitTimeoutMs?: number
   /** Hard cap on any single wait; a larger model-supplied `timeout_ms` is clamped down to it (default 10min). */
   maxWaitTimeoutMs?: number
+  /** Expose `job_wait`, which collects the next unread completion from the calling agent's jobs (default false). */
+  enableWaitAny?: boolean
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
@@ -69,6 +71,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   waitTimeoutMs: z.number().min(1).default(30_000),
   maxWaitTimeoutMs: z.number().min(1).default(600_000),
+  enableWaitAny: z.boolean().default(false),
   completionDelivery: z.union(['quiet', 'wakeup'] as const).default('wakeup'),
   maxConsecutiveWakes: z.number().min(1),
   inlineOutputBytes: z.natural().default(2048),
@@ -238,12 +241,28 @@ function readBody(read: JobRead): { text: string; job: PublicJobSnapshot } {
   return { text, job: publicJob(read.job) }
 }
 
+function jobOutputText(body: string, status: string): string {
+  const text = body.length > 0 ? body : '(no new output)'
+  return `${text}${text.endsWith('\n') ? '' : '\n'}${status}`
+}
+
+function validateTimeout(timeoutMs: number | undefined): void {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new ToolArgsError([`invalid timeout_ms: expected a positive number of milliseconds, got ${JSON.stringify(timeoutMs)}`])
+  }
+}
+
+function hasUserSteer(agent: Agent | undefined): boolean {
+  return agent?.inbox.nextStep.some(message => message.source.kind === 'user') === true
+}
+
 export function apply(ctx: Context, config: Config): void {
   const waitDefault = config.waitTimeoutMs ?? 30_000
   const waitCap = config.maxWaitTimeoutMs ?? 600_000
   const delivery = config.completionDelivery ?? 'wakeup'
   const wakeBudget = config.maxConsecutiveWakes
   const inlineBytes = config.inlineOutputBytes ?? 2048
+  const waitAnyEnabled = config.enableWaitAny === true
 
   // Turns this plugin opened on each owner since that owner last consumed
   // human input. Keyed by the exact Agent, so a same-session replacement
@@ -267,6 +286,16 @@ export function apply(ctx: Context, config: Config): void {
   // still pending, which would only repeat its result.
   const pending = new Map<JobId, PendingNotice>()
 
+  const collectOutput = (id: JobId, owner: JobView['owner']): ReturnType<typeof readBody> => {
+    const body = readBody(ctx.jobs.read(id, owner))
+    const notice = pending.get(id)
+    if (notice === undefined) return body
+    pending.delete(id)
+    ctx.get('agents')?.get(notice.owner)?.inbox.remove(notice.messageId)
+    body.text = `${notice.held ?? ''}${body.text}`
+    return body
+  }
+
   if (delivery === 'wakeup' && wakeBudget !== undefined) {
     ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       // Claiming is the point the human's input actually enters a step; a notice
@@ -279,7 +308,7 @@ export function apply(ctx: Context, config: Config): void {
     for (const [id, notice] of pending) {
       if (notice.messageId !== event.data.id || notice.owner !== session.id) continue
       // A logged notice keeps only a read it did not carry, for `job_output`.
-      if (notice.inline || notice.held === undefined) pending.delete(id)
+      if (notice.inline || (!waitAnyEnabled && notice.held === undefined)) pending.delete(id)
     }
   })
 
@@ -293,13 +322,14 @@ export function apply(ctx: Context, config: Config): void {
     const maxBytes = outputLimits.get(exec) ?? visibleOutputLimit(ctx, exec)
     outputLimits.delete(exec)
     if (maxBytes === undefined) return undefined
-    if (exec.name === 'job_output' && !result.isError) {
+    if ((exec.name === 'job_output' || exec.name === 'job_wait') && !result.isError) {
       // This definition owns and schema-validates the canonical value. Preserve
       // its output/status split only while policy left the default rendering intact.
       const value = result.value as unknown as { text: string; job: PublicJobSnapshot }
       const body = value.text.length > 0 ? value.text : '(no new output)'
       const content = body.endsWith('\n') ? body.slice(0, -1) : body
-      const suffix = `\n${statusLine(value.job)}`
+      const id = exec.name === 'job_wait' ? `${value.job.id} ` : ''
+      const suffix = `\n${id}${statusLine(value.job)}`
       if (rawSingleText(result.content) === `${content}${suffix}`) {
         return [{
           type: 'text',
@@ -317,7 +347,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.systemPrompt.section({
     name: 'tool:jobs',
     order: ctx.systemPrompt.getSectionOrder('TOOL_JOBS'),
-    text: 'Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job\'s work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.',
+    text: 'Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job\'s work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.'
+      + (waitAnyEnabled ? ' Use job_wait when you are blocked until any of your jobs completes.' : ''),
   })
 
   // Live jobs whose kill the model itself requested through `job_kill`: that
@@ -325,6 +356,45 @@ export function apply(ctx: Context, config: Config): void {
   // repeat it. A wait needs no entry here — the registry reports a settlement
   // that released a live wait as `awaited`, whichever plugin was waiting.
   const killedByModel = new Set<JobId>()
+
+  const waiters = new Map<Agent, Set<(job: JobView) => void>>()
+  const waitLifetime = new AbortController()
+  if (waitAnyEnabled) {
+    ctx.effect(() => () => { waitLifetime.abort() }, 'tool-jobs.waits()')
+  }
+
+  const waitForNextJob = (
+    agent: Agent, timeoutMs: number, callSignal: AbortSignal,
+  ): Promise<JobView | 'timeout' | 'user-steered'> => {
+    const signal = AbortSignal.any([callSignal, waitLifetime.signal])
+    return new Promise((resolve, reject) => {
+      const ownerWaiters = waiters.get(agent) ?? new Set()
+      const finish = (result: JobView | 'timeout' | 'user-steered' | Error): void => {
+        if (!ownerWaiters.delete(finish)) return
+        if (ownerWaiters.size === 0) waiters.delete(agent)
+        signal.removeEventListener('abort', onAbort)
+        offInbox()
+        offDisposed()
+        clearTimeout(timer)
+        if (result instanceof Error) reject(result)
+        else resolve(result)
+      }
+      const onAbort = (): void => { finish(new DOMException('wait aborted', 'AbortError')) }
+      const checkInput = (): void => { if (hasUserSteer(agent)) finish('user-steered') }
+      const offInbox = ctx.on('agent/inbox/inserted', ({ agent: subject }) => {
+        if (subject === agent) checkInput()
+      })
+      const offDisposed = ctx.on('agent/disposed', ({ agent: subject }) => {
+        if (subject === agent) onAbort()
+      })
+      const timer = setTimeout(() => { finish('timeout') }, timeoutMs)
+      ownerWaiters.add(finish)
+      waiters.set(agent, ownerWaiters)
+      signal.addEventListener('abort', onAbort, { once: true })
+      if (signal.aborted) onAbort()
+      else checkInput()
+    })
+  }
 
   // Waits this plugin ended on next-step input whose consuming read has not
   // committed yet. A settlement inside that window is carried by that read's
@@ -427,6 +497,15 @@ export function apply(ctx: Context, config: Config): void {
       suppressedSettlements.set(event.job.id, event)
       return
     }
+    if (waiters.size > 0 && event.cause !== 'teardown' && event.job.owner !== undefined) {
+      const owner = ctx.get('agents')?.get(event.job.owner)
+      const waiter = owner === undefined ? undefined : waiters.get(owner)?.values().next().value
+      if (waiter !== undefined) {
+        // Release this wait before the next settlement is dispatched.
+        waiter(event.job)
+        return
+      }
+    }
     deliverSettlement(event)
   })
 
@@ -450,17 +529,11 @@ export function apply(ctx: Context, config: Config): void {
           job: { ...PUBLIC_JOB_SCHEMA, required: true },
         },
       },
-      render: (_args, value) => {
-        const body = value.text.length > 0 ? value.text : '(no new output)'
-        const separator = body.endsWith('\n') ? '' : '\n'
-        return [{ type: 'text', text: `${body}${separator}${statusLine(value.job)}` }]
-      },
+      render: (_args, value) => [{ type: 'text', text: jobOutputText(value.text, statusLine(value.job)) }],
     },
     async execute(args, exec) {
       const id = validateJobId(args.job_id)
-      if (args.timeout_ms !== undefined && (!Number.isFinite(args.timeout_ms) || args.timeout_ms <= 0)) {
-        throw new ToolArgsError([`invalid timeout_ms: expected a positive number of milliseconds, got ${JSON.stringify(args.timeout_ms)}`])
-      }
+      validateTimeout(args.timeout_ms)
       const jobs = ctx.jobs
       const agent = exec.agent
       // A wait this execution ends on next-step input claims the read that
@@ -486,7 +559,7 @@ export function apply(ctx: Context, config: Config): void {
             // Only a user-authored message releases the wait. Other current-step
             // inputs — completion notices and injected context — stay queued for
             // the next step instead of interrupting a wait the user did not.
-            if (agent === undefined || !agent.inbox.nextStep.some(message => message.source.kind === 'user')) return
+            if (!hasUserSteer(agent)) return
             if (endReleasedRead === undefined) {
               endReleasedRead = beginReleasedRead(id)
               releasedBy = 'user steered'
@@ -522,16 +595,9 @@ export function apply(ctx: Context, config: Config): void {
             unsubscribe()
           }
         }
-        const body = readBody(jobs.read(id, exec.agent?.id))
+        const body = collectOutput(id, agent?.id)
         // This result carries any settlement the released wait suppressed.
         if (releasedBy !== undefined) suppressedSettlements.delete(id)
-        const notice = pending.get(id)
-        if (notice !== undefined) {
-          pending.delete(id)
-          // This result covers everything the pending notice reports.
-          ctx.get('agents')?.get(notice.owner)?.inbox.remove(notice.messageId)
-          body.text = `${notice.held ?? ''}${body.text}`
-        }
         // The result, not the schema, explains an interruption: the model sees
         // why a running job came back early beside its unchanged progress line.
         if (releasedBy !== undefined && (body.job.status === 'running' || body.job.status === 'stopping')) {
@@ -543,6 +609,55 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
     presentCall: args => presentJobCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
+  }))
+
+  if (waitAnyEnabled) ctx.tools.register(defineTool({
+    name: 'job_wait',
+    description: 'Collect one unread completion from your own background jobs, waiting up to the timeout if none have finished. Returns immediately when there are no jobs to wait for. Does not cancel any job.',
+    parameters: {
+      timeout_ms: { type: 'number', description: 'Max wait in milliseconds. Defaults to and is capped by configuration.' },
+    },
+    finalizeContent: finalizeJobContent,
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          outcome: { type: 'string', required: true, enum: ['settled', 'timeout', 'no-active-jobs', 'user-steered'] },
+          text: { type: 'string' },
+          job: PUBLIC_JOB_SCHEMA,
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.job === undefined
+          ? value.outcome === 'timeout' ? 'No job completed before the timeout.'
+            : value.outcome === 'user-steered' ? 'Job wait ended because the user steered.'
+              : '(no active jobs or unread completions)'
+          : jobOutputText(value.text ?? '', `${value.job.id} ${statusLine(value.job)}`),
+      }],
+    },
+    async execute(args, exec) {
+      validateTimeout(args.timeout_ms)
+      exec.signal.throwIfAborted()
+      const agent = exec.agent
+      if (agent === undefined) return { outcome: 'no-active-jobs' as const }
+      const owned = ctx.jobs.list(agent.id).filter(job => job.owner === agent.id)
+      const completed = owned.find(job => pending.has(job.id))
+      let selected: JobView | 'timeout' | 'user-steered'
+      if (completed !== undefined) {
+        selected = completed
+      } else {
+        const hasActive = owned.some(job => (job.status === 'running' || job.status === 'stopping') && !killedByModel.has(job.id))
+        if (!hasActive) return { outcome: 'no-active-jobs' as const }
+        selected = await waitForNextJob(agent, Math.min(args.timeout_ms ?? waitDefault, waitCap), exec.signal)
+      }
+      if (typeof selected === 'string') return { outcome: selected }
+      const body = collectOutput(selected.id, agent.id)
+      if (selected.outputLimitBytes !== undefined) outputLimits.set(exec, selected.outputLimitBytes)
+      return { outcome: 'settled' as const, ...body }
+    },
+    presentCall: () => presentJobCall('Wait for a background job', 'read'),
   }))
 
   ctx.tools.register(defineTool({

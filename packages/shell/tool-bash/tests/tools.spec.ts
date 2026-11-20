@@ -317,7 +317,7 @@ describe('bash tool', () => {
     expect(text(result)).not.toContain('[exit code:')
   })
 
-  it('reports truncation with the spill path', async () => {
+  it.each(['tail', 'head-tail'] as const)('reports %s truncation with the spill path', async (outputPreview) => {
     const ctx = new Context()
     provideWorkingDirectoryFixture(ctx)
     await ctx.plugin(SystemPrompt)
@@ -325,12 +325,14 @@ describe('bash tool', () => {
     await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalSubprocessRuntime)
     ;(ctx.subprocess as LocalSubprocessRuntime).internals = { spillDir }
-    await ctx.plugin(LocalBashExecutor, { maxOutputBytes: 100, graceMs: 200 })
+    await ctx.plugin(LocalBashExecutor, { maxOutputBytes: 100, outputPreview, graceMs: 200 })
     await ctx.plugin(BashEnvPlugin)
     await ctx.plugin(ToolBash)
     const result = await call(ctx, 'bash', { command: 'for i in $(seq 1 100); do printf "line-%04d\\n" $i; done', description: 'test command' })
     expect(text(result)).toContain('[output truncated; full output: ')
     expect(text(result)).toContain('line-0100')
+    expect(text(result).includes('line-0001')).toBe(outputPreview === 'head-tail')
+    expect(text(result).includes('[... output omitted ...]')).toBe(outputPreview === 'head-tail')
   })
 
   it('honors workdir', async () => {

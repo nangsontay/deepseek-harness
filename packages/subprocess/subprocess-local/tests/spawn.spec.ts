@@ -571,6 +571,20 @@ describe('OutputCollector', () => {
     expect(readFileSync(out.spillPath!, 'utf8')).toBe('0123456789abcdef')
   })
 
+  it.each([30, 100])('bounds head-and-tail text after decoding %s malformed bytes', (size) => {
+    const bytes = Buffer.concat([Buffer.from('START'), Buffer.alloc(size, 0xff), Buffer.from('END')])
+    const collector = new OutputCollector(60, 'malformed', undefined, 'head-tail')
+    collector.push(bytes)
+    const result = collector.finalize()
+    expect(result.truncated).toBe(true)
+    expect(Buffer.byteLength(result.text)).toBeLessThanOrEqual(60)
+    expect(result.text).toMatch(/^START.*\n\[\.\.\. output omitted \.\.\.\]\n.*END$/s)
+
+    const legacy = new OutputCollector(60, 'legacy', undefined)
+    legacy.push(bytes)
+    expect(legacy.finalize()).toEqual({ text: bytes.subarray(-60).toString('utf8'), truncated: bytes.length > 60 })
+  })
+
   it('retains a byte-exact tail across uneven chunk boundaries', () => {
     // A diagnostic tail must be exactly the LAST maxBytes regardless of
     // chunking; dropping only whole chunks would under-retain.
@@ -774,7 +788,7 @@ describe('spill failure reporting without an owner logger', () => {
       expect(result.stdout.spillPath).toBeUndefined()
       const lines = stderr.mock.calls.map(call => String(call[0])).filter(line => line.includes('dsh-subprocess-local:'))
       expect(lines).toHaveLength(1)
-      expect(lines[0]).toContain('stdout spill failed; only the in-memory tail is retained')
+      expect(lines[0]).toContain('stdout spill failed; only the in-memory output is retained')
       expect(lines[0]).toContain('ENOENT')
     } finally {
       stderr.mockRestore()

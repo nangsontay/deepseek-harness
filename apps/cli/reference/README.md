@@ -25,6 +25,23 @@ dsh rescue --from-default-profile web
 dsh rescue
 ```
 
+### Headless coding experiments
+
+Use the [coding experiment overlays](../config/examples/coding-experiments) with a `dsh` build from this checkout. Each overlay is opt-in. Pass `edit-guidance.yml`, `edit-recovery.yml`, or `apply-patch.yml` independently for comparisons. Use `file-editing.yml` to combine those three settings because a later Cordis patch replaces the whole `tool-fs` config. Bash preview applies to the local Bash backend. The verification reminder uses the workspace recorder and requests at most one extra model step per turn before the configured step limit.
+
+```sh
+examples=/absolute/path/to/deepseek-harness/apps/cli/config/examples
+overlays="$examples/coding-experiments"
+dsh --profile headless \
+  --patch "$overlays/file-editing.yml" \
+  --patch "$overlays/shell-preview.yml" \
+  --patch "$overlays/wait-any-job.yml" \
+  --patch "$overlays/verification-reminder.yml" \
+  "Implement the requested change."
+```
+
+To test programmatic tool calling (PTC), put `--patch "$examples/ptc.yml"` before the experiment overlays. Use `verification-prompt.yml` in place of `verification-reminder.yml` for prompt guidance alone. Use the headless overlays with a fresh session per trial and hold the model, provider, sandbox, time limits and task verifier fixed. Export independent verifier results and provider cost into JSONL, then run [the paired analysis script](../../../benchmarks/coding-plugins/summarize.py) with `--help` for the input fields. `--json` logs the CLI's top-level tool calls and step usage. To count PTC subcalls, read `tool/ptc-dispatch` events from the persisted session.
+
 ### App arguments
 
 The launcher's flags come first and end at the first token it does not recognize; everything from there on is handed to the booted profile verbatim through `ctx.cmdlineArgs`, where any injected app plugin may parse it ([`dsh-cmdline`](../../../packages/boot/cmdline/README.md)). `dsh rescue --from-default-profile web --no-open` therefore resets rescue before handing `--no-open` to Web, `dsh --profile web --port 8080` reaches the web app's `--port`, `dsh --profile web --help` prints that app's help and boots nothing, and `dsh --help` (no profile to hand it to) prints the launcher's own. `-V`/`--version` prints the launcher's version when it appears before the app-argument boundary.

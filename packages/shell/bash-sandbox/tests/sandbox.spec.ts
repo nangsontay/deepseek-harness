@@ -535,6 +535,20 @@ describe('result facts', () => {
     const result = await run(bash, bash.resolve({ command: 'true' }))
     expect(result.sandbox).toEqual({ mode: 'read-only', denied: false, enforcement: 'partial' })
   })
+
+  it('classifies denials from the diagnostic tail even when the preview omits them', async () => {
+    const { ctx, bash } = await setup({ outputPreview: 'head-tail', maxOutputBytes: 80 })
+    try {
+      const result = await run(bash, bash.resolve({
+        command: `printf '%s' '${'x'.repeat(100)}Permission denied${'y'.repeat(40)}' >&2; exit 1`,
+      }))
+      expect(result.stderr.text).toContain('[... output omitted ...]')
+      expect(result.stderr.text).not.toContain('Permission denied')
+      expect(result.sandbox).toEqual({ mode: 'read-only', denied: true, enforcement: 'full' })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('background sandbox facts', () => {

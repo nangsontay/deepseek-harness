@@ -71,7 +71,7 @@ async function setup(config: ToolJobs.Config = {}, registry: RegistryConfig = {}
 
 /** The delivery surface a completion notice may reach on a fake owner. */
 interface FakeDelivery {
-  inject?: (...args: unknown[]) => void
+  inject?: (message: UserMessage) => void
   followup?: (...args: unknown[]) => void
   remove?: (...args: unknown[]) => boolean
   /** Defaults to `running`, the lane that never wakes, so notice-content tests pin one lane. */
@@ -169,8 +169,8 @@ function producer(overrides: Partial<Omit<JobSpec, 'run' | 'output'> & JobHooks>
 }
 
 let callCounter = 0
-function call(ctx: Context, name: string, args: unknown, agent?: Agent) {
-  return executeToolFixture(ctx, { signal: testToolSignal, callId: brandString<ToolCallId>(`call-${++callCounter}`), name, arguments: args, ...agent ? { agent } : {} })
+function call(ctx: Context, name: string, args: unknown, agent?: Agent, signal = testToolSignal) {
+  return executeToolFixture(ctx, { signal, callId: brandString<ToolCallId>(`call-${++callCounter}`), name, arguments: args, ...agent ? { agent } : {} })
 }
 
 function text(result: { content: { type: string; text?: string }[] }): string {
@@ -178,6 +178,118 @@ function text(result: { content: { type: string; text?: string }[] }): string {
 }
 
 const tick = () => new Promise<void>(r => setTimeout(r, 0))
+
+describe('job_wait', () => {
+  it('is opt-in and returns immediately when there are no caller-owned jobs', async () => {
+    const defaults = await setup()
+    const { ctx } = await setup({ enableWaitAny: true })
+    const owner = await fakeAgent(ctx, 'waiting')
+    const other = await fakeAgent(ctx, 'other')
+    const foreign = producer({ owner: other.id })
+    const unowned = producer()
+    ctx.jobs.start(foreign.spec)
+    ctx.jobs.start(unowned.spec)
+    try {
+      expect((await call(defaults.ctx, 'job_wait', {})).isError).toBe(true)
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toEqual({ outcome: 'no-active-jobs' })
+      expect((await call(ctx, 'job_wait', {})).value).toEqual({ outcome: 'no-active-jobs' })
+    } finally {
+      foreign.settle({ status: 'completed' })
+      unowned.settle({ status: 'completed' })
+      await ctx.fiber.dispose()
+      await defaults.ctx.fiber.dispose()
+    }
+  })
+
+  it('collects already-settled unread output once even when its status-only notice was logged', async () => {
+    const { ctx } = await setup({ enableWaitAny: true, inlineOutputBytes: 0 })
+    const injected = vi.fn<(message: UserMessage) => void>()
+    const owner = await fakeAgent(ctx, 'waiting', { inject: injected })
+    const task = producer({ owner: owner.id })
+    const id = ctx.jobs.start(task.spec)
+    try {
+      task.append('previous output\n')
+      task.settle({ status: 'completed', result: 'result' })
+      await tick()
+      const notice = injected.mock.calls[0]?.[0]
+      expect(notice).toBeDefined()
+      ctx.emit('session/event', owner.session, { type: 'user/message', seq: 1, time: 0, data: notice } as SessionEvent)
+
+      const wait = await call(ctx, 'job_wait', {}, owner)
+      expect(wait.value).toMatchObject({ outcome: 'settled', text: 'previous output\nresult', job: { id } })
+      expect(text(wait)).toContain(`${id} [status: completed]`)
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toEqual({ outcome: 'no-active-jobs' })
+      expect(text(await call(ctx, 'job_output', { job_id: id }, owner))).toBe('(no new output)\n[status: completed]')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('returns the first of several simultaneous owned completions and leaves the others available', async () => {
+    const { ctx } = await setup({ enableWaitAny: true })
+    const injected = vi.fn()
+    const owner = await fakeAgent(ctx, 'waiting', { inject: injected })
+    const other = await fakeAgent(ctx, 'other')
+    const foreign = producer({ owner: other.id })
+    ctx.jobs.start(foreign.spec)
+    const tasks = Array.from({ length: 3 }, () => producer({ owner: owner.id }))
+    const ids = tasks.map(task => ctx.jobs.start(task.spec))
+    const listed = Promise.withResolvers<undefined>()
+    const list = ctx.jobs.list.bind(ctx.jobs)
+    vi.spyOn(ctx.jobs, 'list').mockImplementation((...args) => {
+      listed.resolve(undefined)
+      return list(...args)
+    })
+    try {
+      const wait = call(ctx, 'job_wait', {}, owner)
+      await listed.promise
+      foreign.settle({ status: 'completed', result: 'foreign' })
+      tasks[2]!.settle({ status: 'failed', result: 'third' })
+      tasks[0]!.settle({ status: 'completed', result: 'first' })
+      tasks[1]!.settle({ status: 'completed', result: 'second' })
+
+      expect((await wait).value).toMatchObject({ outcome: 'settled', text: 'third', job: { id: ids[2], status: 'failed' } })
+      expect(injected).toHaveBeenCalledTimes(2)
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toMatchObject({ outcome: 'settled', text: 'first', job: { id: ids[0] } })
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toMatchObject({ outcome: 'settled', text: 'second', job: { id: ids[1] } })
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toEqual({ outcome: 'no-active-jobs' })
+    } finally {
+      foreign.settle({ status: 'completed' })
+      for (const task of tasks) task.settle({ status: 'completed' })
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('releases a timed-out, cancelled, or steered wait without cancelling or swallowing completion', async () => {
+    const { ctx } = await setup({ enableWaitAny: true, waitTimeoutMs: 5, maxWaitTimeoutMs: 100 })
+    const owner = await fakeAgent(ctx, 'waiting')
+    const task = producer({ owner: owner.id })
+    const id = ctx.jobs.start(task.spec)
+    try {
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toEqual({ outcome: 'timeout' })
+      const listed = Promise.withResolvers<undefined>()
+      const list = ctx.jobs.list.bind(ctx.jobs)
+      vi.spyOn(ctx.jobs, 'list').mockImplementation((...args) => {
+        listed.resolve(undefined)
+        return list(...args)
+      })
+      const controller = new AbortController()
+      const wait = call(ctx, 'job_wait', { timeout_ms: 100 }, owner, controller.signal)
+      await listed.promise
+      controller.abort()
+      expect((await wait).isError).toBe(true)
+      insertNextStep(ctx, owner, 'new instruction')
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toEqual({ outcome: 'user-steered' })
+      expect(task.cancels).toEqual([])
+      task.settle({ status: 'completed', result: 'after waiting' })
+      await tick()
+      expect((await call(ctx, 'job_wait', {}, owner)).value).toMatchObject({ outcome: 'settled', text: 'after waiting', job: { id } })
+    } finally {
+      task.settle({ status: 'completed' })
+      await ctx.fiber.dispose()
+    }
+  })
+})
 
 /** Start and settle `count` owned jobs one at a time, letting each notice land. */
 async function settleTasks(ctx: Context, owner: Agent, count: number): Promise<void> {

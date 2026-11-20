@@ -37,6 +37,8 @@ kind: "package-reference"
 
 `job_list` 选择与同批并行安全调用并发调度，因为它读取的是状态快照。`job_output` 仍按独占方式执行，因为每次读取都会消费流游标和一次性的结果投递；`job_kill` 仍按独占方式执行，因为它会请求取消。
 
+设置 `enableWaitAny: true` 后，`job_wait(timeout_ms?)` 从调用方 agent 自己的后台任务中领取一条未读的完成结果。它先检查已结算的任务，再等待一个归属任务完成。领取时返回 `{ outcome: 'settled', text, job }`，并撤回该任务尚未投递的通知。已由 `job_output` 领取或通过内联通知投递的结果会被跳过。没有可领取或可等待的任务时立即返回 `no-active-jobs`。超时或用户 steer 分别返回 `timeout` 或 `user-steered`，后台任务继续运行。
+
 ### 完成通知
 
 任务完成时，拥有它的 agent 会收到 `background job <id> (<kind>: <label>) finished [status: ...]. Output:`，其后是它尚未读取的输出和任务的最终结果；没有输出时则以 `. No new output.` 结尾。只有完整文本同时不超过 `inlineOutputBytes`（默认 2048 字节）和生产方的 `outputLimitBytes` 时，通知才会内联；否则改以 `. Read its output with job_output.` 结尾，因此较大的输出和较大的最终结果会以 `job_output` 结果的形式抵达模型，由工具管线的 spill 策略限制其大小。label 取其首行，上限 120 个字符。在通知仍待领时收走该任务的 `job_output` 调用会撤回该通知；从未抵达模型的通知会把输出留给 `job_output`。繁忙的 agent 会在下一步收到注入的通知——inbox 尚有内容时轮次无法结束，因此同时结算的多个任务只花掉一步，而不是各占一轮。空闲的 agent 则被一个 follow-up 轮次唤醒，因为无人领取的通知就是模型永远不会知道的完成。模型已经收走的完成不再通知：注册表把释放了存活 `wait` 的结算报告为 `awaited`——无论是 `job_output` 的等待，还是 shell 工具在等待自己的前台命令——插件则记着模型经 `job_kill` 请求的杀停；所有者或服务 teardown 导致的结算会被跳过，因为没有人能读它。若结算发生在用户 steer 结束等待之后、该次调用的读取之前，终态由那次读取携带，插件因此不再发出通知，避免把同一个完成报告两次。
@@ -53,8 +55,9 @@ kind: "package-reference"
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `waitTimeoutMs` | `30,000` | `wait: true` 省略 `timeout_ms` 时使用的等待时间 |
+| `waitTimeoutMs` | `30,000` | `job_output` 或 `job_wait` 等待时省略 `timeout_ms` 所用的等待时间 |
 | `maxWaitTimeoutMs` | `600,000` | 模型所给等待时间的上限；更大的值向下收敛到它 |
+| `enableWaitAny` | `false` | 提供 `job_wait` 并在提示中说明何时调用 |
 | `completionDelivery` | `wakeup` | `wakeup` 为空闲所有者开启一轮；`quiet` 让通知继续待领 |
 | `maxConsecutiveWakes` | 未设置 | 一个所有者可由唤醒开启的轮数，超出后通知降级为注入；未设置即不封顶 |
 | `inlineOutputBytes` | `2048` | 内联携带任务输出和最终结果的完整通知的最大长度；`0` 表示从不内联 |

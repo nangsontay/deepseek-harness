@@ -33,6 +33,10 @@ export interface Config {
   write?: boolean
   /** Register `edit` and its guidance. Defaults to true. */
   edit?: boolean
+  /** Explain how to copy native or Code-mode read output into a literal edit. */
+  editGuidance?: boolean
+  /** Offer a recovery step after a literal edit fails to find its target. */
+  editRecoveryHint?: boolean
   /** Register `apply_patch` and its guidance beside `edit`. Defaults to false; shipped compositions set it on their `tool-fs` rows. */
   applyPatch?: boolean
   /** Default and maximum number of lines returned by one `read` call. */
@@ -50,6 +54,8 @@ export const Config: z<Config> = z.object({
   readImage: z.boolean().default(true),
   write: z.boolean().default(true),
   edit: z.boolean().default(true),
+  editGuidance: z.boolean().default(false),
+  editRecoveryHint: z.boolean().default(false),
   applyPatch: z.boolean().default(false),
   readLimit: z.number().default(READ_LIMIT),
   readMaxLineLength: z.number().default(READ_MAX_LINE_LENGTH),
@@ -97,7 +103,7 @@ export function apply(ctx: Context, config: Config): void {
   if (resolved.write || resolved.edit || resolved.applyPatch) {
     const sandbox = new FsSandboxController(ctx)
     if (resolved.write) applyWriteTool(ctx, sandbox)
-    if (resolved.edit) applyEditTool(ctx, sandbox)
+    if (resolved.edit) applyEditTool(ctx, sandbox, resolved)
     if (resolved.applyPatch) applyApplyPatchTool(ctx, sandbox)
   }
 }

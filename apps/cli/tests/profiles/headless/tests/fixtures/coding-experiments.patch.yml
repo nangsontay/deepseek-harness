@@ -1,0 +1,13 @@
+- id: llm-deepseek
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: session-title-llm
+  disabled: true
+- id: agent-default-model
+  config:
+    provider: coding-experiments
+    model: fixture
+- insert:
+    - id: coding-experiments-model
+      name: ./coding-experiments-model.ts

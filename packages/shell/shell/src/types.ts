@@ -119,6 +119,8 @@ export interface ShellExecSpec {
    * stdout; stderr keeps the executor's own output cap.
    */
   stdoutMaxBytes: number
+  /** Opt-in result preview; incremental readers still see the ordinary tail. */
+  outputPreview?: 'head-tail'
   /** Abort signal — implementations kill the command when it fires, and treat a signal that is already aborted as fired. */
   signal?: AbortSignal | undefined
   /** Bytes to write to stdin before closing it; absent means no stdin. */

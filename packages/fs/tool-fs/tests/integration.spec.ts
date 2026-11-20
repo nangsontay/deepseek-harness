@@ -167,6 +167,32 @@ describe('guarded deployment (with dsh-fs-observation-policy)', () => {
   })
 
   describe('edit → disk', () => {
+    it('adds opt-in copy guidance only while read and edit are available', async () => {
+      expect((await ctx.systemPrompt.assemble()).sections.map(section => section.text).join('\n'))
+        .not.toContain('keep the original indentation')
+      await fiber.dispose()
+      fiber = await ctx.plugin(ToolFs, { editGuidance: true })
+      expect((await ctx.systemPrompt.assemble()).sections.map(section => section.text).join('\n'))
+        .toContain('take the text field of each line')
+      await fiber.dispose()
+      fiber = await ctx.plugin(ToolFs, { editGuidance: true, read: false })
+      expect((await ctx.systemPrompt.assemble()).sections.map(section => section.text).join('\n'))
+        .not.toContain('keep the original indentation')
+    })
+
+    it('preserves literal matching and exposes a recovery hint only when enabled', async () => {
+      await writeFile(join(dir, 'literal.txt'), '  keep indentation\n')
+      const args = { file_path: 'literal.txt', old_string: '1:   keep indentation', new_string: 'deleted' }
+      await call('read', { file_path: args.file_path })
+      expect(text(await call('edit', args))).not.toContain('excluding any displayed line numbers')
+      await fiber.dispose()
+      fiber = await ctx.plugin(ToolFs, { editRecoveryHint: true })
+      const failed = await call('edit', args)
+      expect(failed).toMatchObject({ isError: true, error: { info: { code: 'FS_EDIT_NOT_FOUND' } } })
+      expect(text(failed)).toContain('excluding any displayed line numbers')
+      expect(await readFile(join(dir, args.file_path), 'utf8')).toBe('  keep indentation\n')
+    })
+
     it('applies a unique literal replacement after a read', async () => {
       await writeFile(join(dir, 'a.txt'), 'hello world')
       await call('read', { file_path: 'a.txt' })

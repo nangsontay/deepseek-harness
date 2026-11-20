@@ -656,10 +656,10 @@ const TOOL_PACKAGES: ToolPackage[] = [
     writes: ['tool/call', 'tool/result', 'user/message via agent.inject() for background completion notices'],
     async mount(ctx) {
       await ctx.plugin(LocalJobRegistry)
-      await ctx.plugin(ToolJobs)
+      await ctx.plugin(ToolJobs, { enableWaitAny: true })
     },
     note:
-      'The kind-agnostic background-job controller: background bash commands and PTY sends are read, listed, and killed through the same three tools. Loading the plugin attaches the controller that arms producers\' `ctx.jobs.start()`.',
+      'The kind-agnostic background-job controller: background bash commands and PTY sends are read, listed, and killed through the same tools. Set `tool-jobs.enableWaitAny: true` to also offer `job_wait`. Loading the plugin attaches the controller that arms producers\' `ctx.jobs.start()`.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-agent-team',

@@ -44,9 +44,12 @@ Load the executor with the budgets you want; every field has a default, so the s
 | `cwd` | `process.cwd()` | Default working directory for commands |
 | `timeoutMs` | `120,000` | Default foreground timeout, in milliseconds |
 | `maxTimeoutMs` | `600,000` | Cap for per-call timeout overrides |
-| `maxOutputBytes` | `64,000` | Per-stream in-memory output cap; overflow spills to a temp file |
+| `maxOutputBytes` | `64,000` | Per-stream preview byte cap and live tail window |
+| `outputPreview` | `tail` | Set to `head-tail` to show the beginning and end of truncated output with a gap marker |
 | `maxSpillBytes` | `67,108,864` | Per-stream full-output spill cap |
 | `graceMs` | `3,000` | Grace period for kill escalation and post-exit pipe draining |
+
+With the local subprocess provider, `head-tail` keeps the preview and gap marker within `maxOutputBytes` and preserves the full tail window for live job reads. It retains up to half the cap in extra memory per stream. Whole streams remain recoverable through spill files up to `maxSpillBytes`.
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-bash-local) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -123,7 +126,7 @@ Read these pages when the executor contract is not enough. They move from the se
 <a id="model-experience"></a>
 ## Model Experience
 
-Indirectly, through `dsh-tool-bash`, which renders this executor's bounded stdout/stderr tails, background-process deltas, spill-file paths, and infrastructure failures.
+Indirectly, through `dsh-tool-bash`, which renders this executor's bounded stdout/stderr previews, background-process deltas, spill-file paths, and infrastructure failures.
 
 #### KV Cache effect
 

@@ -1,0 +1,9 @@
+- insert:
+    - id: workspace-changes
+      name: '@deepseek-ai/dsh-workspace-changes'
+    - id: coding-verification
+      name: ../coding-verification.ts
+      inject: [systemPrompt, workspaceChanges]
+      config:
+        runtimeReminder: true
+        maxTurnSteps: 12

@@ -118,11 +118,13 @@ function validateBashArgs(args: BashToolArgs, effectiveMode: SandboxMode | undef
   validateEscalationArgs(args.sandbox_permissions, justification)
 }
 
-function bashDescription(): string {
+function bashDescription(preview: 'tail' | 'head-tail'): string {
   return 'Execute a bash command (`bash -c`) and return its stdout/stderr. '
     + 'Each call runs in a fresh shell; pass `workdir` instead of using `cd`. '
     + `Managed \`$${DSH_ENV_PREFIX}*\` variables expose current harness environment facts. `
-    + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
+    + (preview === 'head-tail'
+      ? 'Long output can show its beginning and end with a gap marked in between; the full output is saved to a file whose path is reported when available. '
+      : 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. ')
     + 'Provide `description` before `command` in the arguments. '
     + 'Before any delete or move, verify that the resolved absolute target path is the intended one; never run it against a computed path you have not checked. '
     + 'An unset variable expands to an empty string, so guard variables in such paths with `${VAR:?}`. '
@@ -412,7 +414,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     return defineTool({
       name: 'bash',
-      description: bashDescription(),
+      description: bashDescription(ctx.shell.outputPreview),
       parameters: {
         description: {
           type: 'string',

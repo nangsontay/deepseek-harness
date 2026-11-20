@@ -75,6 +75,11 @@ export abstract class ShellExecutor extends Service {
     return undefined
   }
 
+  /** @returns Which preview the executor requests for settled output. */
+  get outputPreview(): 'tail' | 'head-tail' {
+    return 'tail'
+  }
+
   /**
    * Apply implementation-owned defaults and caps to a request before execution.
    * @param request - the caller's request; omitted fields get this

@@ -3,7 +3,17 @@ import { randomBytes } from 'node:crypto'
 import { closeSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { CollectedOutput } from '@deepseek-ai/dsh-subprocess'
+import { StringDecoder } from 'node:string_decoder'
+import type { CollectedOutput, SubprocessCollect } from '@deepseek-ai/dsh-subprocess'
+
+const OMITTED_OUTPUT = '\n[... output omitted ...]\n'
+const OMITTED_OUTPUT_BYTES = Buffer.byteLength(OMITTED_OUTPUT)
+
+function tailAtBoundary(bytes: Buffer, limit: number): Buffer {
+  let start = Math.max(0, bytes.length - limit)
+  while (start < bytes.length && (bytes.readUInt8(start) & 0xc0) === 0x80) start++
+  return bytes.subarray(start)
+}
 
 /**
  * Receives one spill failure so the owner can log it through its own logger.
@@ -63,7 +73,7 @@ process.once('exit', () => {
  * @param label - the failed stream label.
  */
 function reportSpillFailureToStderr(error: unknown, label: string): void {
-  process.stderr.write(`dsh-subprocess-local: ${label} spill failed; only the in-memory tail is retained: ${String(error)}\n`)
+  process.stderr.write(`dsh-subprocess-local: ${label} spill failed; only the in-memory output is retained: ${String(error)}\n`)
 }
 
 /**
@@ -78,7 +88,7 @@ export function logSpillFailure(logger: { error(message: string, ...detail: unkn
   return (error, label) => {
     const removedDirectory = (error as NodeJS.ErrnoException).code === 'ENOENT'
     logger.error(
-      `${owner} could not write the complete ${label} stream to its spill file; the result keeps only the in-memory tail and reports no full-output path.`
+      `${owner} could not write the complete ${label} stream to its spill file; the result keeps only the in-memory output and reports no full-output path.`
       + (removedDirectory ? ' The spill directory no longer exists; a temporary-file cleaner removing it while empty is the usual cause.' : ''),
       error,
     )
@@ -112,7 +122,7 @@ export function prepareManagedProcessBinding(
 
 
 /**
- * Collects one stream with a bounded in-memory tail. With spill options, on
+ * Collects one stream with a bounded in-memory tail and optional preview prefix. With spill options, on
  * first overflow a spill file is created and every chunk (including those
  * already collected) is appended there while the full stream remains within
  * the cap; without them, only the in-memory tail is ever retained (the
@@ -130,6 +140,8 @@ export class OutputCollector {
   private chunks: Buffer[] = []
   private bytes = 0
   private dropped = false
+  private readonly previewHeadBytes: number | undefined
+  private previewHead: Buffer | undefined
   private spillFd: number | undefined
   private spillFile: string | undefined
   private spillDisabled: boolean
@@ -140,13 +152,18 @@ export class OutputCollector {
    * @param maxBytes - in-memory tail cap in bytes.
    * @param label - stream label used in spill file names and failure reports.
    * @param spill - spill storage; omit for tail-only collection.
+   * @param preview - retain part of the first window for a head-and-tail preview as well.
    */
   constructor(
     private readonly maxBytes: number,
     private readonly label: string,
     private readonly spill: SpillOptions | undefined,
+    preview?: SubprocessCollect['preview'],
   ) {
     this.spillDisabled = spill === undefined
+    this.previewHeadBytes = preview === 'head-tail'
+      ? Math.max(0, Math.floor((maxBytes - OMITTED_OUTPUT_BYTES) / 2))
+      : undefined
   }
 
   /**
@@ -162,6 +179,9 @@ export class OutputCollector {
     const overflows = this.bytes + chunk.length > this.maxBytes
     const spill = this.spill
     if (spill !== undefined && !this.spillDisabled && (overflows || this.spillFd !== undefined)) this.spillAll(spill, chunk)
+    if (overflows && !this.dropped && this.previewHeadBytes !== undefined && this.previewHeadBytes > 0) {
+      this.previewHead = Buffer.concat([...this.chunks, chunk], this.previewHeadBytes)
+    }
     this.chunks.push(chunk)
     this.bytes += chunk.length
     while (this.bytes > this.maxBytes) {
@@ -300,14 +320,48 @@ export class OutputCollector {
 
   /**
    * Seal the spill file and return the final output.
-   * @returns the final collected output: tail text, truncation flag, and the spill path when intact.
+   * @returns the final collected output and the spill path when intact.
    */
   finalize(): CollectedOutput {
     this.seal()
+    return this.readPreview()
+  }
+
+  /**
+   * Format the settled preview without changing the tail's offset window.
+   * @returns the preview text, truncation flag, and intact spill path.
+   */
+  readPreview(): CollectedOutput {
+    const buffer = Buffer.concat(this.chunks)
     return {
-      text: Buffer.concat(this.chunks).toString('utf8'),
-      truncated: this.dropped,
+      ...this.previewHeadBytes === undefined
+        ? { text: buffer.toString('utf8'), truncated: this.dropped }
+        : this.headTailPreview(buffer, this.previewHeadBytes),
       ...this.spillFile !== undefined ? { spillPath: this.spillFile } : {},
     }
+  }
+
+  private headTailPreview(buffer: Buffer, headLimit: number): Pick<CollectedOutput, 'text' | 'truncated'> {
+    const limit = Math.floor(this.maxBytes)
+    let head = this.previewHead
+    if (!this.dropped) {
+      const text = buffer.toString('utf8')
+      if (Buffer.byteLength(text) <= limit) return { text, truncated: false }
+      // Replacement characters can overflow the text budget before the byte collector spills.
+      buffer = Buffer.from(text)
+      if (headLimit > 0) head = buffer.subarray(0, headLimit)
+    }
+
+    const tailLimit = head === undefined ? limit : limit - OMITTED_OUTPUT_BYTES - headLimit
+    let tailText = tailAtBoundary(buffer, tailLimit).toString('utf8')
+    if (Buffer.byteLength(tailText) > tailLimit) tailText = tailAtBoundary(Buffer.from(tailText), tailLimit).toString('utf8')
+    if (head === undefined) return { text: tailText, truncated: true }
+
+    // A fresh decoder omits a partial scalar left at the end of either prefix cut.
+    let headText = new StringDecoder('utf8').write(head)
+    if (Buffer.byteLength(headText) > headLimit) {
+      headText = new StringDecoder('utf8').write(Buffer.from(headText).subarray(0, headLimit))
+    }
+    return { text: headText + OMITTED_OUTPUT + tailText, truncated: true }
   }
 }

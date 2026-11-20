@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -112,6 +112,51 @@ describe('LocalBashExecutor.run', () => {
     expect(result.stdout.text).toBe('x'.repeat(500))
     expect(result.stderr.truncated).toBe(true)
     expect(result.stderr.text.length).toBeLessThanOrEqual(100)
+  })
+
+  it.each(['tail', 'head-tail'] as const)('keeps bounded %s output, both streams and the real exit status', async (preview) => {
+    const config = preview === 'tail' ? {} : { outputPreview: preview }
+    const { bash, ctx } = await setup({ ...config, maxOutputBytes: 59 })
+    const stdout = 'OUT-START' + '🦊'.repeat(100) + 'OUT-END'
+    const stderr = 'ERR-START' + '🍁'.repeat(100) + 'ERR-END'
+    try {
+      const execution = await bash.execute(bash.resolve({ command: `printf '%s' '${stdout}'; printf '%s' '${stderr}' >&2; exit 17` }))
+      const result = await execution.result()
+      expect(result.exitCode).toBe(17)
+      for (const [output, original, marker] of [[result.stdout, stdout, 'OUT'], [result.stderr, stderr, 'ERR']] as const) {
+        expect(output.truncated).toBe(true)
+        expect(Buffer.byteLength(output.text)).toBeLessThanOrEqual(59)
+        expect(output.text.endsWith(`${marker}-END`)).toBe(true)
+        expect(readFileSync(output.spillPath!, 'utf8')).toBe(original)
+        if (preview === 'head-tail') {
+          expect(output.text.startsWith(`${marker}-START`)).toBe(true)
+          expect(output.text).toContain('[... output omitted ...]')
+          expect(output.text).not.toContain('\uFFFD')
+        } else {
+          expect(output.text).not.toContain(`${marker}-START`)
+          expect(output.text).not.toContain('output omitted')
+        }
+      }
+      const live = execution.observed.stdout.readFrom(0)
+      expect(live.lossy).toBe(true)
+      expect(live.nextOffset).toBe(Buffer.byteLength(stdout))
+      expect(live.text).not.toContain('output omitted')
+      expect(execution.observed.stdout.readFrom(live.nextOffset).text).toBe('')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps an enabled head-and-tail preview when the spill exceeds its cap', async () => {
+    const { bash, ctx } = await setup({ outputPreview: 'head-tail', maxOutputBytes: 64, maxSpillBytes: 80 })
+    try {
+      const result = await run(bash, bash.resolve({ command: `printf '%s' 'start-${'x'.repeat(100)}-end'` }))
+      expect(result.stdout.text).toMatch(/^start-.*\n\[\.\.\. output omitted \.\.\.\]\n.*-end$/)
+      expect(result.stdout.truncated).toBe(true)
+      expect(result.stdout.spillPath).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('per-call timeout takes precedence under the cap and kills on expiry', async () => {

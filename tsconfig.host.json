@@ -9,6 +9,10 @@
   },
   "include": [
     "snapshots/session/headless.snapshot.ts",
+    "apps/cli/config/examples/coding-verification.ts",
+    "apps/cli/tests/coding-verification.spec.ts",
+    "apps/cli/tests/profiles/headless/tests/coding-experiments.expected.e2e.ts",
+    "apps/cli/tests/profiles/headless/tests/fixtures/coding-experiments-model.ts",
     "apps/web/tests/home-whale.e2e.ts",
     "apps/web/tests/sidebar-drawer.e2e.ts",
     "apps/web/tests/session-panel-layout.e2e.ts",

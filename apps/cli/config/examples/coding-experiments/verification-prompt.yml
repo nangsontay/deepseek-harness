@@ -1,0 +1,3 @@
+- insert:
+    - id: coding-verification
+      name: ../coding-verification.ts

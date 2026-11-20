@@ -292,6 +292,7 @@ export function bindManagedProcess(
       mode.maxBytes,
       label,
       mode.spill === undefined ? undefined : { maxBytes: mode.spill.maxBytes, dir: spillDir, onFailure: onSpillFailure },
+      mode.preview,
     )
     stream.on('data', (chunk: Buffer) => { collector.push(chunk) })
     return collector

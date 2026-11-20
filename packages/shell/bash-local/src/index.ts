@@ -45,9 +45,11 @@ export interface Config {
   timeoutMs: Volatile<number>
   /** Upper bound for per-call timeout overrides. */
   maxTimeoutMs: Volatile<number>
-  /** Per-stream in-memory output cap; overflow spills to a temp file. */
+  /** Byte cap for each stream's settled preview and incremental tail window. */
   maxOutputBytes: Volatile<number>
-  /** Per-stream spill-file cap; larger streams retain only their in-memory tail. */
+  /** Settled output preview strategy. Live readers continue to receive tail deltas. */
+  outputPreview: 'tail' | 'head-tail'
+  /** Per-stream spill-file cap; larger streams retain only their in-memory output. */
   maxSpillBytes: Volatile<number>
   /** Grace period for kill escalation and inherited pipes; at most `MAX_TIMER_DELAY_MS`. */
   graceMs: Volatile<number>
@@ -55,6 +57,7 @@ export interface Config {
 
 /** Project a settled collect-mode reader into the final CollectedOutput shape. */
 function finalOutput(reader: SubprocessOutputReader): CollectedOutput {
+  if (reader.readPreview !== undefined) return reader.readPreview()
   const read = reader.readFrom(0)
   return {
     text: read.text,
@@ -102,12 +105,17 @@ export class LocalBashExecutor extends ShellExecutor {
     timeoutMs: z.number().default(120_000).volatile(),
     maxTimeoutMs: z.number().default(600_000).volatile(),
     maxOutputBytes: z.number().default(64_000).volatile(),
+    outputPreview: z.union(['tail', 'head-tail'] as const).default('tail'),
     maxSpillBytes: z.number().default(DEFAULT_MAX_SPILL_BYTES).volatile(),
     graceMs: z.number().default(DEFAULT_GRACE_MS).volatile(),
   })
 
   constructor(ctx: Context, readonly config: Config) {
     super(ctx)
+  }
+
+  override get outputPreview(): 'tail' | 'head-tail' {
+    return this.config.outputPreview
   }
 
   /**
@@ -133,6 +141,7 @@ export class LocalBashExecutor extends ShellExecutor {
       timeoutMs,
       onExpiry: request.onExpiry ?? 'kill',
       stdoutMaxBytes,
+      ...this.outputPreview === 'head-tail' ? { outputPreview: 'head-tail' } : {},
       ...request.signal ? { signal: request.signal } : {},
       // Carry stdin/ordinary env/trusted dshEnv through verbatim — optional,
       // no config default. The subprocess service owns the scrub and merge order.
@@ -154,8 +163,11 @@ export class LocalBashExecutor extends ShellExecutor {
     stdoutMaxBytes: number,
     signal: AbortSignal | undefined,
   ): SubprocessSpawnSpec {
-    const collect = (maxBytes: number): SubprocessCollect =>
-      ({ maxBytes, spill: { maxBytes: this.config.maxSpillBytes.get() } })
+    const collect = (maxBytes: number): SubprocessCollect => ({
+      maxBytes,
+      spill: { maxBytes: this.config.maxSpillBytes.get() },
+      ...spec.outputPreview !== undefined ? { preview: spec.outputPreview } : {},
+    })
     return {
       argv,
       cwd: spec.workdir,

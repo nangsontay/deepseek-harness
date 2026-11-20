@@ -55,7 +55,7 @@ kind: "package-reference"
 
 ### 配置
 
-所有键均为可选。`read`、`readImage`、`write` 和 `edit` 开关默认为 `true`；将开关设为 `false` 可省略对应工具及其指导文本。`applyPatch` 默认为 `false`；[`dsh-base`](../../bundle/base/cordis.patch.yml) 与 Web 的 `standard` preset 在各自的 `tool-fs` 行上开启它，而 Web 的 `ptc`、`cordis` preset 显式写出 `applyPatch: false`，改这一行即可在 `edit` 旁加入或去掉该工具。允许关闭全部五个工具。启用 `readImage` 仍需要附件存储和支持图片输入的模型。关闭 `read` 时仍会校验读取上限。
+所有键均为可选。`read`、`readImage`、`write` 和 `edit` 开关默认为 `true`。设为 `false` 可省略对应工具及其指导文本。[`dsh-base`](../../bundle/base/cordis.patch.yml) 和随附的 Web 预设均将 `applyPatch` 默认设为 `false`。设为 `true` 可在 `edit` 旁加入多文件补丁工具。允许关闭全部五个工具。启用 `readImage` 仍需要附件存储和支持图片输入的模型。关闭 `read` 时仍会校验读取上限。
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
@@ -63,6 +63,8 @@ kind: "package-reference"
 | `readImage` | `true` | 附件存储挂载时注册 `read_image` |
 | `write` | `true` | 注册 `write` 及其指导文本 |
 | `edit` | `true` | 注册 `edit` 及其指导文本 |
+| `editGuidance` | `false` | 指导模型从 Native 和 Code 模式的读取结果复制原文进行精确替换 |
+| `editRecoveryHint` | `false` | 精确匹配失败时提供恢复步骤 |
 | `applyPatch` | `false` | 注册 `apply_patch` 及其提示 |
 | `readLimit` | `2000` | 一次 `read` 调用返回的默认和最大行数 |
 | `readMaxLineLength` | `2000` | 每行截断前保留的字符数 |

@@ -1,0 +1,6 @@
+# One row combines the file options because Cordis replaces config per row.
+- id: tool-fs
+  config:
+    editGuidance: true
+    editRecoveryHint: true
+    applyPatch: true
